@@ -627,7 +627,7 @@ const weaponCatalog = {
   },
   smg: {
     name: "SMG",
-    damage: 1,
+    damage: 0.75,
     cooldown: 0.07,
     mag: 42,
     reload: 1.1,
@@ -638,9 +638,9 @@ const weaponCatalog = {
   },
   shotgun: {
     name: "Shotgun",
-    damage: 2,
+    damage: 10,
     cooldown: 0.42,
-    mag: 8,
+    mag: 6,
     reload: 1.8,
     kick: 1.4,
     color: 0x6f5d4a,
