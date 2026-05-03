@@ -671,7 +671,7 @@ const enemies = [];
 const zombieSpawning = {
   gameTimeSec: 0,
   acc: 0,
-  basePerMinute: 5,
+  basePerMinute: 10,
   scalePerMinute: 1.1,
 };
 
