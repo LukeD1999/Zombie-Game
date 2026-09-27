@@ -90,35 +90,137 @@ function popTone(freq, duration, gain) {
   o.stop(t0 + duration + 0.01);
 }
 
+let distortionCurve;
+function getDistortionCurve(amount = 24) {
+  if (distortionCurve && distortionCurve.amount === amount) return distortionCurve.curve;
+  const n = 4096;
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i += 1) {
+    const x = (i * 2) / n - 1;
+    curve[i] = ((3 + amount) * x * 20 * (Math.PI / 180)) / (Math.PI + amount * Math.abs(x));
+  }
+  distortionCurve = { amount, curve };
+  return curve;
+}
+
+/** Shared small-room impulse response, used as a wet send for gunfire and death groans. */
+let reverbSend;
+function getReverb() {
+  if (reverbSend) return reverbSend;
+  const c = getAudioContext();
+  const convolver = c.createConvolver();
+  const len = Math.floor(c.sampleRate * 0.8);
+  const impulse = c.createBuffer(2, len, c.sampleRate);
+  for (let ch = 0; ch < 2; ch += 1) {
+    const data = impulse.getChannelData(ch);
+    for (let i = 0; i < len; i += 1) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 2.4;
+    }
+  }
+  convolver.buffer = impulse;
+  const wet = c.createGain();
+  wet.gain.setValueAtTime(0.2, c.currentTime);
+  convolver.connect(wet);
+  wet.connect(master);
+  reverbSend = convolver;
+  return reverbSend;
+}
+
+function randRange(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+/** Distorted, band-passed transient — the "crack" of a shot reaching the ear. */
+function gunCrack({ duration, hpf, lpf, gain, distAmount = 26 }) {
+  const c = getAudioContext();
+  const t0 = c.currentTime;
+  const src = c.createBufferSource();
+  src.buffer = masterNoiseBuffer;
+  const shaper = c.createWaveShaper();
+  shaper.curve = getDistortionCurve(distAmount);
+  shaper.oversample = "2x";
+  const hp = c.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.setValueAtTime(hpf, t0);
+  const lp = c.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(lpf, t0);
+  lp.frequency.exponentialRampToValueAtTime(Math.max(200, lpf * 0.35), t0 + duration);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, t0);
+  g.gain.linearRampToValueAtTime(gain, t0 + 0.0008);
+  g.gain.exponentialRampToValueAtTime(0.01, t0 + duration);
+  src.connect(hp);
+  hp.connect(shaper);
+  shaper.connect(lp);
+  lp.connect(g);
+  g.connect(master);
+  g.connect(getReverb());
+  src.start(t0);
+  src.stop(t0 + duration + 0.02);
+}
+
+/** Low, chesty "thump" that gives a shot its weight, separate from the crack. */
+function gunBody({ duration, freq, gain }) {
+  const c = getAudioContext();
+  const t0 = c.currentTime;
+  const o = c.createOscillator();
+  o.type = "triangle";
+  o.frequency.setValueAtTime(freq, t0);
+  o.frequency.exponentialRampToValueAtTime(freq * 0.25, t0 + duration);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, t0);
+  g.gain.linearRampToValueAtTime(gain, t0 + 0.001);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+  o.connect(g);
+  g.connect(master);
+  g.connect(getReverb());
+  o.start(t0);
+  o.stop(t0 + duration + 0.01);
+}
+
+/** Tiny metallic transient for bolt/slide/hammer action. */
+function mechanicalClack(freq = 1200, gain = 0.05, delaySec = 0) {
+  const c = getAudioContext();
+  const t0 = c.currentTime + delaySec;
+  const o = c.createOscillator();
+  o.type = "square";
+  o.frequency.setValueAtTime(freq, t0);
+  const g = c.createGain();
+  g.gain.setValueAtTime(gain, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.015);
+  o.connect(g);
+  g.connect(master);
+  o.start(t0);
+  o.stop(t0 + 0.02);
+}
+
 function playWeaponShot(weaponId) {
   getAudioContext();
+  const jitter = randRange(0.95, 1.05);
   if (weaponId === "shotgun") {
-    noiseBlast({ duration: 0.16, hpf: 200, lpf: 5000, gain: 0.65 });
-    popTone(180, 0.1, 0.25);
-    popTone(90, 0.18, 0.2);
+    gunCrack({ duration: 0.05 * jitter, hpf: 900, lpf: 6500, gain: 0.55, distAmount: 42 });
+    noiseBlast({ duration: 0.22 * jitter, hpf: 120, lpf: 2600, gain: 0.58 });
+    gunBody({ duration: 0.22, freq: 140 * jitter, gain: 0.3 });
+    gunBody({ duration: 0.32, freq: 68 * jitter, gain: 0.22 });
+    mechanicalClack(650, 0.045, 0.02);
   } else if (weaponId === "smg") {
-    noiseBlast({ duration: 0.045, hpf: 500, lpf: 10000, gain: 0.28 });
-    popTone(800, 0.03, 0.08);
+    gunCrack({ duration: 0.028 * jitter, hpf: 1400, lpf: 9500, gain: 0.3, distAmount: 20 });
+    noiseBlast({ duration: 0.035 * jitter, hpf: 600, lpf: 8500, gain: 0.2 });
+    gunBody({ duration: 0.05, freq: 480 * jitter, gain: 0.06 });
+    mechanicalClack(1700, 0.02, 0.006);
   } else {
-    noiseBlast({ duration: 0.1, hpf: 350, lpf: 7000, gain: 0.42 });
-    popTone(500, 0.06, 0.12);
+    gunCrack({ duration: 0.045 * jitter, hpf: 1100, lpf: 8000, gain: 0.44, distAmount: 30 });
+    noiseBlast({ duration: 0.09 * jitter, hpf: 250, lpf: 5500, gain: 0.36 });
+    gunBody({ duration: 0.1, freq: 320 * jitter, gain: 0.13 });
+    mechanicalClack(1200, 0.035, 0.012);
   }
 }
 
 function playEmptyClick() {
   getAudioContext();
-  const c = getAudioContext();
-  const t0 = c.currentTime;
-  const o = c.createOscillator();
-  o.type = "square";
-  o.frequency.setValueAtTime(180, t0);
-  const g = c.createGain();
-  g.gain.setValueAtTime(0.12, t0);
-  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.04);
-  o.connect(g);
-  g.connect(master);
-  o.start(t0);
-  o.stop(t0 + 0.05);
+  mechanicalClack(920, 0.11, 0);
+  mechanicalClack(640, 0.06, 0.045);
 }
 
 function playReloadStart(weaponId) {
@@ -164,24 +266,27 @@ function playReloadDone() {
 
 function playEnemyHit() {
   getAudioContext();
-  noiseBlast({ duration: 0.07, hpf: 200, lpf: 3000, gain: 0.22 });
-  popTone(150, 0.05, 0.12);
+  const wet = randRange(0.9, 1.1);
+  noiseBlast({ duration: 0.07 * wet, hpf: 200, lpf: 3000, gain: 0.22 });
+  popTone(150 * wet, 0.05, 0.12);
 }
 
 function playEnemyDeath() {
   getAudioContext();
   const c = getAudioContext();
   const t0 = c.currentTime;
+  const pitch = randRange(0.85, 1.2);
   const o = c.createOscillator();
   o.type = "sawtooth";
-  o.frequency.setValueAtTime(200, t0);
-  o.frequency.exponentialRampToValueAtTime(60, t0 + 0.2);
+  o.frequency.setValueAtTime(200 * pitch, t0);
+  o.frequency.exponentialRampToValueAtTime(55 * pitch, t0 + 0.22);
   const g = c.createGain();
   g.gain.setValueAtTime(0, t0);
   g.gain.linearRampToValueAtTime(0.1, t0 + 0.02);
   g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.25);
   o.connect(g);
   g.connect(master);
+  g.connect(getReverb());
   o.start(t0);
   o.stop(t0 + 0.3);
   noiseBlast({ duration: 0.1, hpf: 100, lpf: 2000, gain: 0.15 });
@@ -262,21 +367,29 @@ function playWeaponSwitch() {
 }
 
 let lastFoot = 0;
+let footToggle = false;
 function playFootstep(nowSec, moving, onGround) {
   if (!moving || !onGround) return;
   if (nowSec - lastFoot < 0.32) return;
   lastFoot = nowSec;
+  footToggle = !footToggle;
   getAudioContext();
   const c = getAudioContext();
   const t0 = c.currentTime;
-  noiseBlast({ duration: 0.04, hpf: 200, lpf: 2000, gain: 0.06 });
+  const pitchVar = randRange(0.85, 1.18);
+  noiseBlast({
+    duration: 0.045,
+    hpf: footToggle ? 170 : 140,
+    lpf: 2200,
+    gain: 0.055 + Math.random() * 0.02,
+  });
   const o = c.createOscillator();
   o.type = "triangle";
-  o.frequency.setValueAtTime(60, t0);
+  o.frequency.setValueAtTime(55 * pitchVar, t0);
   const g = c.createGain();
   g.gain.setValueAtTime(0, t0);
   g.gain.linearRampToValueAtTime(0.04, t0 + 0.001);
-  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.04);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.045);
   o.connect(g);
   g.connect(master);
   o.start(t0);
@@ -703,141 +816,307 @@ for (const weaponId of weaponOrder) {
   weaponAmmoById[weaponId] = weaponCatalog[weaponId].mag;
 }
 
+/**
+ * Small canvas-generated speckle texture used to break up flat procedural
+ * materials (skin blotches, cloth grime, brushed metal) without loading
+ * any external asset files.
+ */
+const textureCache = {};
+function getSpeckleTexture(key, { size = 128, base, speckleA, speckleB, count = 700 }) {
+  if (textureCache[key]) return textureCache[key];
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const c = canvas.getContext("2d");
+  c.fillStyle = base;
+  c.fillRect(0, 0, size, size);
+  for (let i = 0; i < count; i += 1) {
+    c.globalAlpha = 0.08 + Math.random() * 0.35;
+    c.fillStyle = Math.random() < 0.5 ? speckleA : speckleB;
+    const r = 0.5 + Math.random() * 2.6;
+    c.beginPath();
+    c.arc(Math.random() * size, Math.random() * size, r, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  textureCache[key] = tex;
+  return tex;
+}
+
+function getBrushedMetalTexture(key, { base, streak, size = 128 }) {
+  if (textureCache[key]) return textureCache[key];
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const c = canvas.getContext("2d");
+  c.fillStyle = base;
+  c.fillRect(0, 0, size, size);
+  for (let i = 0; i < 260; i += 1) {
+    c.globalAlpha = 0.08 + Math.random() * 0.22;
+    c.strokeStyle = streak;
+    c.lineWidth = 0.4 + Math.random() * 0.8;
+    const y = Math.random() * size;
+    c.beginPath();
+    c.moveTo(0, y);
+    c.lineTo(size, y + (Math.random() - 0.5) * 3);
+    c.stroke();
+  }
+  c.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, 3);
+  textureCache[key] = tex;
+  return tex;
+}
+
+/** Attach a rotating pivot at `jointPos` (relative to `parent`) holding a limb mesh offset by `meshOffsetY`. */
+function addLimbSegment(parent, jointPos, geo, mat, meshOffsetY) {
+  const pivot = new THREE.Group();
+  pivot.position.copy(jointPos);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.y = meshOffsetY;
+  mesh.castShadow = true;
+  pivot.add(mesh);
+  parent.add(pivot);
+  return pivot;
+}
+
 function makeZombie() {
   const root = new THREE.Group();
+  const hue = Math.random() * 0.06 - 0.03;
+
+  const skinTex = getSpeckleTexture("zombieSkin", {
+    base: "#5a7d5a",
+    speckleA: "#2f4a30",
+    speckleB: "#8fae7c",
+  });
+  const clothTex = getSpeckleTexture("zombieCloth", {
+    base: "#39415a",
+    speckleA: "#242a3a",
+    speckleB: "#523030",
+  });
 
   const bodyMat = new THREE.MeshStandardMaterial({
-    color: 0x4f7a54,
-    roughness: 0.7,
-    metalness: 0.08,
+    color: new THREE.Color(0x4f7a54).offsetHSL(hue, 0, 0),
+    map: skinTex,
+    roughness: 0.8,
+    metalness: 0.04,
   });
   const shirtMat = new THREE.MeshStandardMaterial({
-    color: 0x3f4963,
-    roughness: 0.8,
-    metalness: 0.05,
+    color: new THREE.Color(0x3f4963).offsetHSL(hue, 0, 0),
+    map: clothTex,
+    roughness: 0.92,
+    metalness: 0.02,
   });
   const headMat = new THREE.MeshStandardMaterial({
-    color: 0x7ea17a,
-    roughness: 0.9,
+    color: new THREE.Color(0x7ea17a).offsetHSL(hue, 0, 0),
+    map: skinTex,
+    roughness: 0.85,
     metalness: 0.02,
   });
   const eyeMat = new THREE.MeshStandardMaterial({
     color: 0xff6161,
-    emissive: 0x330000,
+    emissive: 0x440000,
   });
 
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.8, 0.9), shirtMat);
-  torso.position.y = 2.2;
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.56, 1.05, 4, 8), shirtMat);
+  torso.position.y = 2.35;
+  torso.rotation.x = 0.12;
   torso.castShadow = true;
   root.add(torso);
 
-  const hips = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.8, 0.75), bodyMat);
-  hips.position.y = 1.1;
+  const hips = new THREE.Mesh(new THREE.CapsuleGeometry(0.5, 0.35, 3, 8), bodyMat);
+  hips.position.y = 1.55;
   hips.castShadow = true;
   root.add(hips);
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.95, 0.95), headMat);
-  head.position.y = 3.45;
-  head.castShadow = true;
-  root.add(head);
-
-  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 8), eyeMat);
-  eyeL.position.set(-0.2, 3.5, 0.48);
-  const eyeR = eyeL.clone();
-  eyeR.position.x = 0.2;
-  root.add(eyeL, eyeR);
-
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.38, 1.4, 0.38), bodyMat);
-  armL.position.set(-1.02, 2.25, 0);
-  armL.castShadow = true;
-  const armR = armL.clone();
-  armR.position.x = 1.02;
-  root.add(armL, armR);
-
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.45, 1.45, 0.45), bodyMat);
-  legL.position.set(-0.35, 0.25, 0);
-  legL.castShadow = true;
-  const legR = legL.clone();
-  legR.position.x = 0.35;
-  root.add(legL, legR);
-
-  return { root, limbs: { armL, armR, legL, legR } };
-}
-
-function makeZombieDog() {
-  const root = new THREE.Group();
-
-  const furMat = new THREE.MeshStandardMaterial({
-    color: 0x5f6b4e,
-    roughness: 0.85,
-    metalness: 0.04,
-  });
-  const scarMat = new THREE.MeshStandardMaterial({
-    color: 0x7a2f2f,
-    roughness: 0.9,
-    metalness: 0.02,
-  });
-  const eyeMat = new THREE.MeshStandardMaterial({
-    color: 0xff6969,
-    emissive: 0x2b0000,
-  });
-
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.65, 2), furMat);
-  torso.position.set(0, 0.95, 0);
-  torso.castShadow = true;
-  root.add(torso);
-
-  const neck = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.55), furMat);
-  neck.position.set(0, 1.05, -1.05);
-  neck.rotation.x = -0.35;
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.3, 8), headMat);
+  neck.position.y = 3.02;
   neck.castShadow = true;
   root.add(neck);
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.52, 0.8), furMat);
-  head.position.set(0, 1.03, -1.45);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.48, 12, 10), headMat);
+  head.scale.set(0.9, 1.05, 0.88);
+  head.position.set(0, 3.42, 0.05);
+  head.rotation.x = 0.16;
   head.castShadow = true;
   root.add(head);
 
-  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.24, 0.42), scarMat);
-  snout.position.set(0, 0.95, -1.9);
-  snout.castShadow = true;
-  root.add(snout);
+  const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.18, 0.3), headMat);
+  jaw.position.set(0, 3.14, 0.32);
+  jaw.castShadow = true;
+  root.add(jaw);
 
-  const earL = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.26, 0.12), furMat);
-  earL.position.set(-0.24, 1.35, -1.5);
-  earL.rotation.z = -0.2;
-  const earR = earL.clone();
-  earR.position.x = 0.24;
-  earR.rotation.z = 0.2;
-  root.add(earL, earR);
-
-  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
-  eyeL.position.set(-0.18, 1.07, -1.83);
+  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 8), eyeMat);
+  eyeL.position.set(-0.18, 3.48, 0.42);
   const eyeR = eyeL.clone();
   eyeR.position.x = 0.18;
   root.add(eyeL, eyeR);
 
-  const legTemplate = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.72, 0.25), furMat);
-  legTemplate.castShadow = true;
-  const frontL = legTemplate.clone();
-  frontL.position.set(-0.4, 0.34, -0.65);
-  const frontR = legTemplate.clone();
-  frontR.position.set(0.4, 0.34, -0.65);
-  const rearL = legTemplate.clone();
-  rearL.position.set(-0.4, 0.34, 0.67);
-  const rearR = legTemplate.clone();
-  rearR.position.set(0.4, 0.34, 0.67);
-  root.add(frontL, frontR, rearL, rearR);
+  const upperArmGeo = new THREE.CapsuleGeometry(0.16, 0.56, 4, 6);
+  const forearmGeo = new THREE.CapsuleGeometry(0.14, 0.5, 4, 6);
+  const handGeo = new THREE.SphereGeometry(0.13, 8, 8);
 
-  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.58), furMat);
-  tail.position.set(0, 1.05, 1.25);
-  tail.rotation.x = 0.55;
+  const shoulderL = addLimbSegment(root, new THREE.Vector3(-0.95, 2.78, 0), upperArmGeo, bodyMat, -0.3);
+  const elbowL = addLimbSegment(shoulderL, new THREE.Vector3(0, -0.58, 0), forearmGeo, bodyMat, -0.27);
+  const handL = new THREE.Mesh(handGeo, bodyMat);
+  handL.position.y = -0.55;
+  handL.castShadow = true;
+  elbowL.add(handL);
+
+  const shoulderR = addLimbSegment(root, new THREE.Vector3(0.95, 2.78, 0), upperArmGeo, bodyMat, -0.3);
+  const elbowR = addLimbSegment(shoulderR, new THREE.Vector3(0, -0.58, 0), forearmGeo, bodyMat, -0.27);
+  const handR = new THREE.Mesh(handGeo, bodyMat);
+  handR.position.y = -0.55;
+  handR.castShadow = true;
+  elbowR.add(handR);
+
+  shoulderL.rotation.x = -0.5;
+  shoulderR.rotation.x = -0.5;
+  elbowL.rotation.x = 0.35;
+  elbowR.rotation.x = 0.35;
+
+  const upperLegGeo = new THREE.CapsuleGeometry(0.2, 0.58, 4, 6);
+  const lowerLegGeo = new THREE.CapsuleGeometry(0.17, 0.54, 4, 6);
+  const footGeo = new THREE.BoxGeometry(0.24, 0.14, 0.4);
+
+  const hipL = addLimbSegment(root, new THREE.Vector3(-0.32, 1.42, 0), upperLegGeo, bodyMat, -0.3);
+  const kneeL = addLimbSegment(hipL, new THREE.Vector3(0, -0.6, 0), lowerLegGeo, bodyMat, -0.28);
+  const footL = new THREE.Mesh(footGeo, shirtMat);
+  footL.position.set(0, -0.58, 0.08);
+  footL.castShadow = true;
+  kneeL.add(footL);
+
+  const hipR = addLimbSegment(root, new THREE.Vector3(0.32, 1.42, 0), upperLegGeo, bodyMat, -0.3);
+  const kneeR = addLimbSegment(hipR, new THREE.Vector3(0, -0.6, 0), lowerLegGeo, bodyMat, -0.28);
+  const footR = new THREE.Mesh(footGeo, shirtMat);
+  footR.position.set(0, -0.58, 0.08);
+  footR.castShadow = true;
+  kneeR.add(footR);
+
+  return {
+    root,
+    limbs: { shoulderL, shoulderR, elbowL, elbowR, hipL, hipR, kneeL, kneeR },
+  };
+}
+
+function makeZombieDog() {
+  const root = new THREE.Group();
+  const hue = Math.random() * 0.05 - 0.025;
+
+  const furTex = getSpeckleTexture("dogFur", {
+    base: "#4c5640",
+    speckleA: "#333c29",
+    speckleB: "#6c7856",
+  });
+
+  const furMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(0x5f6b4e).offsetHSL(hue, 0, 0),
+    map: furTex,
+    roughness: 0.9,
+    metalness: 0.03,
+  });
+  const scarMat = new THREE.MeshStandardMaterial({
+    color: 0x7a2f2f,
+    roughness: 0.92,
+    metalness: 0.02,
+  });
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0xff6969,
+    emissive: 0x3a0000,
+  });
+
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 1.3, 4, 8), furMat);
+  torso.rotation.z = Math.PI / 2;
+  torso.position.set(0, 0.95, 0);
+  torso.castShadow = true;
+  root.add(torso);
+
+  const ribs = new THREE.Mesh(new THREE.SphereGeometry(0.46, 8, 6), furMat);
+  ribs.scale.set(1, 0.85, 1.15);
+  ribs.position.set(0, 0.9, 0.15);
+  ribs.castShadow = true;
+  root.add(ribs);
+
+  const neck = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.35, 3, 6), furMat);
+  neck.rotation.x = 1.05;
+  neck.position.set(0, 1.05, -1.05);
+  neck.castShadow = true;
+  root.add(neck);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.38, 10, 8), furMat);
+  head.scale.set(0.95, 0.85, 1.05);
+  head.position.set(0, 1.05, -1.45);
+  head.castShadow = true;
+  root.add(head);
+
+  const snout = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.22, 0.4), scarMat);
+  snout.position.set(0, 0.95, -1.88);
+  snout.castShadow = true;
+  root.add(snout);
+
+  const jawLower = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.08, 0.34), scarMat);
+  jawLower.position.set(0, 0.85, -1.85);
+  jawLower.castShadow = true;
+  root.add(jawLower);
+
+  const earL = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.3, 6), furMat);
+  earL.position.set(-0.24, 1.38, -1.48);
+  earL.rotation.z = -0.25;
+  earL.castShadow = true;
+  const earR = earL.clone();
+  earR.position.x = 0.24;
+  earR.rotation.z = 0.25;
+  root.add(earL, earR);
+
+  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
+  eyeL.position.set(-0.18, 1.09, -1.8);
+  const eyeR = eyeL.clone();
+  eyeR.position.x = 0.18;
+  root.add(eyeL, eyeR);
+
+  const upperLegGeo = new THREE.CapsuleGeometry(0.11, 0.36, 3, 6);
+  const lowerLegGeo = new THREE.CapsuleGeometry(0.09, 0.32, 3, 6);
+  const pawGeo = new THREE.BoxGeometry(0.16, 0.1, 0.22);
+
+  function addDogLeg(x, z) {
+    const shoulder = addLimbSegment(root, new THREE.Vector3(x, 0.85, z), upperLegGeo, furMat, -0.2);
+    const knee = addLimbSegment(shoulder, new THREE.Vector3(0, -0.36, 0), lowerLegGeo, furMat, -0.18);
+    const paw = new THREE.Mesh(pawGeo, scarMat);
+    paw.position.set(0, -0.34, 0.05);
+    paw.castShadow = true;
+    knee.add(paw);
+    return { shoulder, knee };
+  }
+
+  const frontL = addDogLeg(-0.36, -0.65);
+  const frontR = addDogLeg(0.36, -0.65);
+  const rearL = addDogLeg(-0.36, 0.67);
+  const rearR = addDogLeg(0.36, 0.67);
+
+  const tail = new THREE.Mesh(new THREE.CapsuleGeometry(0.08, 0.5, 3, 6), furMat);
+  tail.rotation.x = 1.0;
+  tail.position.set(0, 1.05, 1.3);
   tail.castShadow = true;
   root.add(tail);
 
   return {
     root,
-    limbs: { frontL, frontR, rearL, rearR, tail, head },
+    limbs: {
+      frontL: frontL.shoulder,
+      frontR: frontR.shoulder,
+      rearL: rearL.shoulder,
+      rearR: rearR.shoulder,
+      frontLKnee: frontL.knee,
+      frontRKnee: frontR.knee,
+      rearLKnee: rearL.knee,
+      rearRKnee: rearR.knee,
+      tail,
+      head,
+    },
   };
 }
 
@@ -847,14 +1126,65 @@ function makeZombieDog() {
  */
 function buildWeaponModel(weaponId) {
   const root = new THREE.Group();
+  const metalTex = getBrushedMetalTexture("gunMetal", { base: "#23262c", streak: "#565f6b" });
+  const gripTex = getSpeckleTexture("gunGrip", {
+    base: "#181a1e",
+    speckleA: "#0c0d10",
+    speckleB: "#2a2d33",
+    count: 1400,
+  });
+  const woodTex = getSpeckleTexture("gunWood", {
+    base: "#4a3423",
+    speckleA: "#2f2013",
+    speckleB: "#6b4c31",
+    count: 500,
+  });
   const metal = (hex, m = 0.72) =>
-    new THREE.MeshStandardMaterial({ color: hex, roughness: 0.38, metalness: m });
-  const dark = (hex) => new THREE.MeshStandardMaterial({ color: hex, roughness: 0.88, metalness: 0.08 });
+    new THREE.MeshStandardMaterial({ color: hex, map: metalTex, roughness: 0.35, metalness: m });
+  const dark = (hex) => new THREE.MeshStandardMaterial({ color: hex, map: gripTex, roughness: 0.85, metalness: 0.1 });
+  const wood = (hex) => new THREE.MeshStandardMaterial({ color: hex, map: woodTex, roughness: 0.75, metalness: 0.03 });
   const muzzleMat = new THREE.MeshBasicMaterial({ color: 0xffbb66, transparent: true, opacity: 0 });
 
   let slide;
   let muzzleFlash;
   const cfg = weaponCatalog[weaponId];
+
+  function addTriggerGuard(z, scale = 1) {
+    const guard = new THREE.Mesh(
+      new THREE.TorusGeometry(0.06 * scale, 0.012 * scale, 6, 12, Math.PI * 1.3),
+      metal(0x2a2e35, 0.6)
+    );
+    guard.rotation.z = Math.PI;
+    guard.rotation.x = Math.PI / 2;
+    guard.position.set(0, -0.12 * scale, z);
+    root.add(guard);
+    const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.06 * scale, 0.015), dark(0x111214));
+    trigger.position.set(0, -0.08 * scale, z);
+    root.add(trigger);
+  }
+
+  function addGrip(z, height = 0.32) {
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.12, height, 0.14), dark(0x1a1c20));
+    grip.position.set(0, -0.05 - height / 2, z);
+    grip.rotation.x = -0.18;
+    grip.castShadow = true;
+    root.add(grip);
+  }
+
+  function addIronSights(frontZ, rearZ, height = 0.16) {
+    const front = new THREE.Mesh(new THREE.BoxGeometry(0.012, height, 0.012), metal(0x14161a, 0.5));
+    front.position.set(0, 0.15 + height / 2, frontZ);
+    root.add(front);
+    const rearBase = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.03, 0.03), metal(0x14161a, 0.5));
+    rearBase.position.set(0, 0.16, rearZ);
+    root.add(rearBase);
+    const rearNotchL = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.05, 0.012), metal(0x14161a, 0.5));
+    rearNotchL.position.set(-0.015, 0.18, rearZ);
+    root.add(rearNotchL);
+    const rearNotchR = rearNotchL.clone();
+    rearNotchR.position.x = 0.015;
+    root.add(rearNotchR);
+  }
 
   if (weaponId === "rifle") {
     const stock = new THREE.Mesh(
@@ -905,6 +1235,10 @@ function buildWeaponModel(weaponId) {
     muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 8), muzzleMat);
     muzzleFlash.position.set(0, 0.01, -0.78);
     root.add(muzzleFlash);
+
+    addGrip(0.14, 0.3);
+    addTriggerGuard(0.1, 1);
+    addIronSights(-0.72, -0.2, 0.14);
   } else if (weaponId === "smg") {
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.15, 0.36), dark(0x1c222c));
     body.position.set(0, 0, 0.02);
@@ -947,12 +1281,13 @@ function buildWeaponModel(weaponId) {
     muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 8), muzzleMat);
     muzzleFlash.position.set(0, 0.01, -0.5);
     root.add(muzzleFlash);
+
+    addGrip(0.16, 0.26);
+    addTriggerGuard(0.12, 0.8);
+    addIronSights(-0.44, 0.06, 0.1);
   } else {
     // shotgun: wide receiver, double barrels, wood stock, moving pump
-    const stock = new THREE.Mesh(
-      new THREE.BoxGeometry(0.12, 0.2, 0.38),
-      new THREE.MeshStandardMaterial({ color: 0x3b2e22, roughness: 0.9, metalness: 0.04 })
-    );
+    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.2, 0.38), wood(0x3b2e22));
     stock.position.set(0, -0.01, 0.34);
     stock.castShadow = true;
     root.add(stock);
@@ -983,13 +1318,17 @@ function buildWeaponModel(weaponId) {
     slide.castShadow = true;
     root.add(slide);
 
-    const forend = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.1), dark(0x2a1f1a));
-    forend.position.set(0, -0.04, -0.1);
+    const forend = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.16), wood(0x2a1f1a));
+    forend.position.set(0, -0.04, -0.18);
+    forend.castShadow = true;
     root.add(forend);
 
     muzzleFlash = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), muzzleMat);
     muzzleFlash.position.set(0, 0.05, -0.55);
     root.add(muzzleFlash);
+
+    addTriggerGuard(0.16, 1.1);
+    addIronSights(-0.5, 0.1, 0.08);
   }
 
   const slideBaseZ = slide.position.z;
@@ -1257,6 +1596,7 @@ function fire() {
   player.shootKick = weapon.kick;
   gunRig.muzzleFlash.material.opacity = 1;
   playWeaponShot(player.weaponId);
+  spawnShellCasing(player.weaponId);
   if (player.ammo <= 0) setMessage("Out of ammo (R to reload)");
 
   const dir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
@@ -1425,19 +1765,29 @@ function updateEnemies(dt) {
     if (enemy.type === "dog") enemy.mesh.rotateY(Math.PI);
     if (enemy.type === "dog") {
       enemy.walkTime += dt * 10;
-      enemy.limbs.frontL.rotation.x = Math.sin(enemy.walkTime) * 0.75;
-      enemy.limbs.frontR.rotation.x = Math.sin(enemy.walkTime + Math.PI) * 0.75;
-      enemy.limbs.rearL.rotation.x = Math.sin(enemy.walkTime + Math.PI) * 0.75;
-      enemy.limbs.rearR.rotation.x = Math.sin(enemy.walkTime) * 0.75;
+      const swing = enemy.walkTime;
+      enemy.limbs.frontL.rotation.x = Math.sin(swing) * 0.7;
+      enemy.limbs.frontR.rotation.x = Math.sin(swing + Math.PI) * 0.7;
+      enemy.limbs.rearL.rotation.x = Math.sin(swing + Math.PI) * 0.7;
+      enemy.limbs.rearR.rotation.x = Math.sin(swing) * 0.7;
+      enemy.limbs.frontLKnee.rotation.x = Math.max(0, Math.sin(swing + 0.6)) * 0.9;
+      enemy.limbs.frontRKnee.rotation.x = Math.max(0, Math.sin(swing + Math.PI + 0.6)) * 0.9;
+      enemy.limbs.rearLKnee.rotation.x = Math.max(0, Math.sin(swing + Math.PI + 0.6)) * 0.9;
+      enemy.limbs.rearRKnee.rotation.x = Math.max(0, Math.sin(swing + 0.6)) * 0.9;
       enemy.limbs.tail.rotation.y = Math.sin(enemy.walkTime * 1.25) * 0.32;
       enemy.limbs.head.rotation.x = Math.sin(enemy.walkTime * 0.5) * 0.08;
       enemy.mesh.position.y = Math.sin(enemy.walkTime * 0.75) * 0.05;
     } else {
       enemy.walkTime += dt * 6.5;
-      enemy.limbs.armL.rotation.x = Math.sin(enemy.walkTime) * 0.45;
-      enemy.limbs.armR.rotation.x = Math.sin(enemy.walkTime + Math.PI) * 0.45;
-      enemy.limbs.legL.rotation.x = Math.sin(enemy.walkTime + Math.PI) * 0.55;
-      enemy.limbs.legR.rotation.x = Math.sin(enemy.walkTime) * 0.55;
+      const swing = enemy.walkTime;
+      enemy.limbs.shoulderL.rotation.x = -0.5 + Math.sin(swing) * 0.5;
+      enemy.limbs.shoulderR.rotation.x = -0.5 + Math.sin(swing + Math.PI) * 0.5;
+      enemy.limbs.elbowL.rotation.x = 0.35 + Math.max(0, Math.sin(swing + 0.8)) * 0.5;
+      enemy.limbs.elbowR.rotation.x = 0.35 + Math.max(0, Math.sin(swing + Math.PI + 0.8)) * 0.5;
+      enemy.limbs.hipL.rotation.x = Math.sin(swing + Math.PI) * 0.6;
+      enemy.limbs.hipR.rotation.x = Math.sin(swing) * 0.6;
+      enemy.limbs.kneeL.rotation.x = Math.max(0, Math.sin(swing)) * 0.9;
+      enemy.limbs.kneeR.rotation.x = Math.max(0, Math.sin(swing + Math.PI)) * 0.9;
       enemy.mesh.position.y = Math.sin(enemy.walkTime * 0.5) * 0.07;
     }
 
@@ -1473,6 +1823,59 @@ function updateBlood(dt) {
     if (particle.life <= 0) {
       scene.remove(particle.mesh);
       bloodParticles.splice(i, 1);
+    }
+  }
+}
+
+const shellCasings = [];
+const shellMat = new THREE.MeshStandardMaterial({ color: 0xc9a227, roughness: 0.35, metalness: 0.85 });
+const shellGeoRifle = new THREE.CylinderGeometry(0.014, 0.014, 0.09, 8);
+const shellGeoShotgun = new THREE.CylinderGeometry(0.028, 0.028, 0.14, 10);
+
+function spawnShellCasing(weaponId) {
+  const geo = weaponId === "shotgun" ? shellGeoShotgun : shellGeoRifle;
+  const shell = new THREE.Mesh(geo, shellMat);
+  shell.castShadow = true;
+  const ejectPoint = gunRig.holder.localToWorld(new THREE.Vector3(0.12, 0.05, -0.15));
+  shell.position.copy(ejectPoint);
+  shell.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+  scene.add(shell);
+
+  const sideDir = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(pitch, yaw, 0, "YXZ"));
+  const velocity = new THREE.Vector3(
+    sideDir.x * (1.8 + Math.random() * 0.8),
+    2.4 + Math.random() * 1.2,
+    sideDir.z * (1.8 + Math.random() * 0.8)
+  );
+  shellCasings.push({
+    mesh: shell,
+    velocity,
+    angularVel: new THREE.Vector3(randRange(-8, 8), randRange(-8, 8), randRange(-8, 8)),
+    life: 2.5,
+    settled: false,
+  });
+}
+
+function updateShellCasings(dt) {
+  for (let i = shellCasings.length - 1; i >= 0; i -= 1) {
+    const shell = shellCasings[i];
+    shell.life -= dt;
+    if (!shell.settled) {
+      shell.velocity.y -= 14 * dt;
+      shell.mesh.position.addScaledVector(shell.velocity, dt);
+      shell.mesh.rotation.x += shell.angularVel.x * dt;
+      shell.mesh.rotation.y += shell.angularVel.y * dt;
+      shell.mesh.rotation.z += shell.angularVel.z * dt;
+      if (shell.mesh.position.y < 0.02) {
+        shell.mesh.position.y = 0.02;
+        shell.velocity.multiplyScalar(0.2);
+        shell.angularVel.multiplyScalar(0.3);
+        if (shell.velocity.length() < 0.3) shell.settled = true;
+      }
+    }
+    if (shell.life <= 0) {
+      scene.remove(shell.mesh);
+      shellCasings.splice(i, 1);
     }
   }
 }
@@ -1560,10 +1963,12 @@ function loop(now) {
     updateZombieSpawning(dt);
     updateEnemies(dt);
     updateBlood(dt);
+    updateShellCasings(dt);
     updateWeaponPickups(dt);
     updateGun(dt);
   } else {
     updateBlood(dt);
+    updateShellCasings(dt);
     updateWeaponPickups(dt);
     updateGun(dt);
   }
